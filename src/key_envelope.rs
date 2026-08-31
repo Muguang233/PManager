@@ -36,7 +36,7 @@ impl KeyEnvelope {
         vault_id: String,
     ) -> Result<Self, String> {
         let kdf = KdfConfig::new()?;
-        let kek = derive_kek(master_password, &kdf)?;
+        let kek = Self::derive_kek_with_kdf(master_password, &kdf)?;
         let dek = random_bytes::<DEK_LEN>()?;
         let key_wrap = KeyWrap::new(&kek, &dek, &vault_id)?;
 
@@ -47,6 +47,45 @@ impl KeyEnvelope {
             key_wrap,
         };
         Ok(envelope)
+    }
+
+    pub fn derive_kek(&self, master_password: &str) -> Result<[u8; KEK_LEN], String> {
+        Self::derive_kek_with_kdf(master_password, &self.kdf)
+    }
+
+    fn derive_kek_with_kdf(
+        master_password: &str,
+        kdf: &KdfConfig,
+    ) -> Result<[u8; KEK_LEN], String> {
+        if kdf.algorithm != "argon2id" {
+            return Err("不支持的 KDF 算法".to_string());
+        }
+
+        let params = Params::new(
+            kdf.mem_cost_kib,
+            kdf.time_cost,
+            kdf.parallelism,
+            Some(KEK_LEN),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let argon2 = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            params,
+        );
+
+        let mut kek = [0u8; KEK_LEN];
+
+        argon2
+            .hash_password_into(
+                master_password.as_bytes(),
+                &kdf.salt,
+                &mut kek,
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok(kek)
     }
 
     pub fn format_version(&self) -> u16 {
@@ -69,7 +108,7 @@ impl KeyEnvelope {
         &self,
         master_password: &str,
     ) -> Result<[u8; DEK_LEN], String> {
-        let kek = derive_kek(master_password, &self.kdf)?;
+        let kek = self.derive_kek(master_password)?;
         let cipher = XChaCha20Poly1305::new_from_slice(&kek)
             .map_err(|_| "KEK 长度错误".to_string())?;
         let vault_id = &self.vault_id;
@@ -172,37 +211,3 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     Ok(bytes)
 }
 
-fn derive_kek(
-    master_password: &str,
-    kdf: &KdfConfig,
-) -> Result<[u8; KEK_LEN], String> {
-    if kdf.algorithm != "argon2id" {
-        return Err("不支持的 KDF 算法".to_string());
-    }
-
-    let params = Params::new(
-        kdf.mem_cost_kib,
-        kdf.time_cost,
-        kdf.parallelism,
-        Some(KEK_LEN),
-    )
-    .map_err(|error| error.to_string())?;
-
-    let argon2 = Argon2::new(
-        Algorithm::Argon2id,
-        Version::V0x13,
-        params,
-    );
-
-    let mut kek = [0u8; KEK_LEN];
-
-    argon2
-        .hash_password_into(
-            master_password.as_bytes(),
-            &kdf.salt,
-            &mut kek,
-        )
-        .map_err(|error| error.to_string())?;
-
-    Ok(kek)
-}
