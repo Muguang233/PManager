@@ -11,7 +11,7 @@ fn create_vault()  -> Result<(), String> {
     print!("Enter your primary_password: ");
     io::stdout().flush().unwrap(); 
     io::stdin().read_line(&mut p_pwd).expect("Failed to read line");
-    let (envelope, dek) = key_envelope::KeyEnvelope::new(&p_pwd, vault_id)?;
+    let envelope = key_envelope::KeyEnvelope::new(&p_pwd, vault_id)?;
     println!("vault id: {}", envelope.vault_id());
     println!("salt length: {}", envelope.kdf().salt().len());
     println!("wrapped DEK length: {}", envelope.key_wrap().ciphertext().len());

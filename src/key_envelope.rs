@@ -34,7 +34,7 @@ impl KeyEnvelope {
     pub fn new(
         master_password: &str,
         vault_id: String,
-    ) -> Result<(Self, [u8; DEK_LEN]), String> {
+    ) -> Result<Self, String> {
         let kdf = KdfConfig::new()?;
         let kek = derive_kek(master_password, &kdf)?;
         let dek = random_bytes::<DEK_LEN>()?;
@@ -46,7 +46,7 @@ impl KeyEnvelope {
             kdf,
             key_wrap,
         };
-        Ok((envelope, dek))
+        Ok(envelope)
     }
 
     pub fn format_version(&self) -> u16 {
@@ -63,6 +63,31 @@ impl KeyEnvelope {
 
     pub fn key_wrap(&self) -> &KeyWrap {
         &self.key_wrap
+    }
+    
+    pub fn get_dek(
+        &self,
+        master_password: &str,
+    ) -> Result<[u8; DEK_LEN], String> {
+        let kek = derive_kek(master_password, &self.kdf)?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&kek)
+            .map_err(|_| "KEK 长度错误".to_string())?;
+        let vault_id = &self.vault_id;
+        let aad = format!("private-vault|v1|{vault_id}|key-envelope");
+        let xnonce = XNonce::try_from(self.key_wrap.nonce.as_slice())
+            .map_err(|_| "Nonce 长度错误".to_string())?;
+        let plaintext_dek = cipher
+            .decrypt(
+                &xnonce,
+                Payload {
+                    msg: &self.key_wrap.ciphertext,
+                    aad: aad.as_bytes(),
+                },
+            )
+            .map_err(|_| "主密码错误或保险库信封已被篡改".to_string())?;
+        plaintext_dek
+            .try_into()
+            .map_err(|_| "解开的 DEK 长度错误".to_string())
     }
 }
 
@@ -109,10 +134,11 @@ impl KeyWrap {
             .map_err(|_| "KEK 长度错误".to_string())?;
 
         let aad = format!("private-vault|v1|{vault_id}|key-envelope");
-
+        let xnonce = XNonce::try_from(nonce.as_slice())
+            .map_err(|_| "Nonce 长度错误".to_string())?;
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &xnonce,
                 Payload {
                     msg: dek,
                     aad: aad.as_bytes(),
