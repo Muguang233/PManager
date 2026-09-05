@@ -13,6 +13,8 @@ const DEK_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
+// 密钥信封保存解密 DEK 所需的元数据和密文。
+// The key envelope stores metadata and the wrapped DEK ciphertext.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyEnvelope  {
     format_version: u16,
@@ -21,6 +23,8 @@ pub struct KeyEnvelope  {
     key_wrap: KeyWrap,
 }
 
+// KDF 配置用于从主密码派生密钥加密密钥 KEK。
+// KDF settings are used to derive the key-encryption key (KEK) from the master password.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KdfConfig {
     algorithm: String,
@@ -30,6 +34,8 @@ pub struct KdfConfig {
     parallelism: u32,
 }
 
+// KeyWrap 保存用于解密 DEK 的算法、nonce 和密文。
+// KeyWrap stores the algorithm, nonce, and ciphertext used to decrypt the DEK.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyWrap {
     algorithm: String,
@@ -38,6 +44,8 @@ pub struct KeyWrap {
 }
 
 impl KeyEnvelope {
+    // 创建新信封，并生成一个随机 DEK 后使用 KEK 封装它。
+    // Create a new envelope and wrap a randomly generated DEK with the KEK.
     pub fn new(
         master_password: &str,
         vault_id: String,
@@ -56,10 +64,14 @@ impl KeyEnvelope {
         Ok(envelope)
     }
 
+    // 使用当前信封中的 KDF 配置从主密码派生 KEK。
+    // Derive the KEK from the master password using this envelope's KDF settings.
     pub fn derive_kek(&self, master_password: &str) -> Result<[u8; KEK_LEN], String> {
         Self::derive_kek_with_kdf(master_password, &self.kdf)
     }
 
+    // 使用给定的 KDF 配置执行 Argon2id 密钥派生。
+    // Derive a key with Argon2id using the supplied KDF configuration.
     fn derive_kek_with_kdf(
         master_password: &str,
         kdf: &KdfConfig,
@@ -95,10 +107,14 @@ impl KeyEnvelope {
         Ok(kek)
     }
 
+    // 将当前信封序列化为格式化的 JSON 字符串。
+    // Serialize the current envelope into a pretty-printed JSON string.
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string_pretty(self).map_err(|error| error.to_string())
     }
 
+    // 将信封保存为 vaults/{vault_id}.json。
+    // Save the envelope as vaults/{vault_id}.json.
     pub fn save_to_vault_file(&self) -> Result<PathBuf, String> {
         let vaults_dir = Self::vaults_dir()?;
         fs::create_dir_all(&vaults_dir)
@@ -113,6 +129,8 @@ impl KeyEnvelope {
         Ok(file_path)
     }
 
+    // 根据 vault_id 从文件读取并反序列化信封。
+    // Load and deserialize an envelope from the file identified by vault_id.
     pub fn from_vault_file(vault_id: &str) -> Result<Self, String> {
         let file_path = Self::vault_file_path(vault_id)?;
         if !file_path.exists() {
@@ -125,12 +143,16 @@ impl KeyEnvelope {
             .map_err(|error| format!("解析 vault JSON 失败: {error}"))
     }
 
+    // 获取项目运行目录下的 vaults 文件夹。
+    // Get the vaults directory under the current project directory.
     fn vaults_dir() -> Result<PathBuf, String> {
         let current_dir = std::env::current_dir()
             .map_err(|error| format!("获取当前目录失败: {error}"))?;
         Ok(current_dir.join("vaults"))
     }
 
+    // 将 vault_id 转换为安全的文件名，避免路径分隔符改变目录结构。
+    // Convert vault_id into a safe filename so separators cannot create subdirectories.
     pub fn vault_file_path(vault_id: &str) -> Result<PathBuf, String> {
         let vaults_dir = Self::vaults_dir()?;
         let safe_id = vault_id.trim().replace(['/', '\\'], "_");
@@ -153,6 +175,8 @@ impl KeyEnvelope {
         &self.key_wrap
     }
     
+    // 使用主密码派生 KEK，并解密出原始 DEK。
+    // Derive the KEK from the master password and decrypt the original DEK.
     pub fn get_dek(
         &self,
         master_password: &str,
@@ -180,6 +204,8 @@ impl KeyEnvelope {
 }
 
 impl KdfConfig {
+    // 创建默认的 Argon2id 配置和随机 salt。
+    // Create the default Argon2id configuration with a random salt.
     pub fn algorithm(&self) -> &str {
         &self.algorithm
     }
@@ -199,6 +225,9 @@ impl KdfConfig {
     pub fn parallelism(&self) -> u32 {
         self.parallelism
     }
+
+    // 创建一组新的 KDF 参数。
+    // Create a new set of KDF parameters.
     pub fn new() -> Result<Self, String> {
         Ok(Self {
             algorithm: String::from("argon2id"),
@@ -211,6 +240,8 @@ impl KdfConfig {
 }
 
 impl KeyWrap {
+    // 使用 XChaCha20-Poly1305 加密 DEK。
+    // Encrypt the DEK with XChaCha20-Poly1305.
     pub fn new(
         kek: &[u8; KEK_LEN],
         dek: &[u8; DEK_LEN],
@@ -255,6 +286,8 @@ impl KeyWrap {
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
+    // 生成密码学安全的随机字节。
+    // Generate cryptographically secure random bytes.
     let mut bytes = [0u8; N];
     fill(&mut bytes).map_err(|error| error.to_string())?;
     Ok(bytes)

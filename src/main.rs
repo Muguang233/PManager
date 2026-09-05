@@ -2,6 +2,8 @@ mod key_envelope;
 use std::io::{self, Write};
 use key_envelope::KeyEnvelope;
 
+// 创建 vault，生成密钥信封并保存到本地文件。
+// Create a vault, generate its key envelope, and save it locally.
 fn create_vault()  -> Result<(), String> {
     let mut vault_id = String::new();
     let mut p_pwd = String::new();
@@ -28,6 +30,8 @@ fn create_vault()  -> Result<(), String> {
     Ok(())
 }
 
+// 根据 vault_id 加载已有的 vault。
+// Load an existing vault by its vault_id.
 fn select_vault() -> Result<(), String> {
     let mut vault_id = String::new();
     print!("vault_id: ");
@@ -38,6 +42,8 @@ fn select_vault() -> Result<(), String> {
     Ok(())
 }
 
+// 程序入口：根据用户输入选择创建或加载 vault。
+// Program entry point: create or load a vault based on the user's input.
 fn main() -> std::io::Result<()>{
     print!("create or select: ");
     io::stdout().flush().unwrap(); 
