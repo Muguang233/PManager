@@ -1,3 +1,6 @@
 /target
 /cfg
 /vaults
+/desktop/rust/target
+/desktop/rust/vaults
+*.db
