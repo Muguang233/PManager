@@ -4,11 +4,16 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use getrandom::fill;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
 const KEK_LEN: usize = 32;
 const DEK_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct KeyEnvelope  {
     format_version: u16,
     vault_id: String,
@@ -16,6 +21,7 @@ pub struct KeyEnvelope  {
     key_wrap: KeyWrap,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct KdfConfig {
     algorithm: String,
     salt: Vec<u8>,
@@ -24,6 +30,7 @@ pub struct KdfConfig {
     parallelism: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct KeyWrap {
     algorithm: String,
     nonce: Vec<u8>,
@@ -86,6 +93,48 @@ impl KeyEnvelope {
             .map_err(|error| error.to_string())?;
 
         Ok(kek)
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self).map_err(|error| error.to_string())
+    }
+
+    pub fn save_to_vault_file(&self) -> Result<PathBuf, String> {
+        let vaults_dir = Self::vaults_dir()?;
+        fs::create_dir_all(&vaults_dir)
+            .map_err(|error| format!("创建 vaults 目录失败: {error}"))?;
+
+        let file_name = format!("{}.json", self.vault_id().trim());
+        let file_path = vaults_dir.join(file_name);
+        let json_text = self.to_json()?;
+        fs::write(&file_path, json_text)
+            .map_err(|error| format!("写入 vault 文件失败: {error}"))?;
+
+        Ok(file_path)
+    }
+
+    pub fn from_vault_file(vault_id: &str) -> Result<Self, String> {
+        let file_path = Self::vault_file_path(vault_id)?;
+        if !file_path.exists() {
+            return Err(format!("vault '{}' 不存在: {}", vault_id, file_path.display()));
+        }
+
+        let json_text = fs::read_to_string(&file_path)
+            .map_err(|error| format!("读取 vault 文件失败: {error}"))?;
+        serde_json::from_str(&json_text)
+            .map_err(|error| format!("解析 vault JSON 失败: {error}"))
+    }
+
+    fn vaults_dir() -> Result<PathBuf, String> {
+        let current_dir = std::env::current_dir()
+            .map_err(|error| format!("获取当前目录失败: {error}"))?;
+        Ok(current_dir.join("vaults"))
+    }
+
+    pub fn vault_file_path(vault_id: &str) -> Result<PathBuf, String> {
+        let vaults_dir = Self::vaults_dir()?;
+        let safe_id = vault_id.trim().replace(['/', '\\'], "_");
+        Ok(vaults_dir.join(format!("{safe_id}.json")))
     }
 
     pub fn format_version(&self) -> u16 {
