@@ -17,7 +17,7 @@ const NONCE_LEN: usize = 24;
 // The key envelope stores metadata and the wrapped DEK ciphertext.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyEnvelope  {
-    format_version: u16,
+    format_version: u8,
     vault_id: String,
     kdf: KdfConfig,
     key_wrap: KeyWrap,
@@ -159,7 +159,7 @@ impl KeyEnvelope {
         Ok(vaults_dir.join(format!("{safe_id}.json")))
     }
 
-    pub fn format_version(&self) -> u16 {
+    pub fn format_version(&self) -> u8 {
         self.format_version
     }
 
@@ -292,4 +292,3 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     fill(&mut bytes).map_err(|error| error.to_string())?;
     Ok(bytes)
 }
-
