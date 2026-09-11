@@ -9,6 +9,15 @@ CREATE TABLE vaults (
     format_version  INTEGER NOT NULL CHECK (format_version >= 1)
 );
 
+-- Local authorization cache. The future backend is the source of truth, but the
+-- client must never enumerate vault files that are not assigned to this account.
+CREATE TABLE account_vaults (
+    account_id  TEXT NOT NULL,
+    vault_id    TEXT NOT NULL,
+    PRIMARY KEY (account_id, vault_id),
+    FOREIGN KEY (vault_id) REFERENCES vaults(vault_id)
+);
+
 CREATE TABLE key_envelopes (
     envelope_id              TEXT PRIMARY KEY,
     vault_id                 TEXT NOT NULL UNIQUE,
