@@ -1,7 +1,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit, Payload},
 };
 use getrandom::fill;
 use serde::{Deserialize, Serialize};
@@ -12,11 +12,14 @@ const KEK_LEN: usize = 32;
 const DEK_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
+const MAX_MEM_COST_KIB: u32 = 262_144;
+const MAX_TIME_COST: u32 = 10;
+const MAX_PARALLELISM: u32 = 4;
 
 // 密钥信封保存解密 DEK 所需的元数据和密文。
 // The key envelope stores metadata and the wrapped DEK ciphertext.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct KeyEnvelope  {
+pub struct KeyEnvelope {
     format_version: u8,
     vault_id: String,
     kdf: KdfConfig,
@@ -46,10 +49,8 @@ pub struct KeyWrap {
 impl KeyEnvelope {
     // 创建新信封，并生成一个随机 DEK 后使用 KEK 封装它。
     // Create a new envelope and wrap a randomly generated DEK with the KEK.
-    pub fn new(
-        master_password: &str,
-        vault_id: String,
-    ) -> Result<Self, String> {
+    pub fn new(master_password: &str, vault_id: String) -> Result<Self, String> {
+        validate_vault_id(&vault_id)?;
         let kdf = KdfConfig::new()?;
         let kek = Self::derive_kek_with_kdf(master_password, &kdf)?;
         let dek = random_bytes::<DEK_LEN>()?;
@@ -76,9 +77,7 @@ impl KeyEnvelope {
         master_password: &str,
         kdf: &KdfConfig,
     ) -> Result<[u8; KEK_LEN], String> {
-        if kdf.algorithm != "argon2id" {
-            return Err("不支持的 KDF 算法".to_string());
-        }
+        validate_kdf(kdf)?;
 
         let params = Params::new(
             kdf.mem_cost_kib,
@@ -88,20 +87,12 @@ impl KeyEnvelope {
         )
         .map_err(|error| error.to_string())?;
 
-        let argon2 = Argon2::new(
-            Algorithm::Argon2id,
-            Version::V0x13,
-            params,
-        );
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let mut kek = [0u8; KEK_LEN];
 
         argon2
-            .hash_password_into(
-                master_password.as_bytes(),
-                &kdf.salt,
-                &mut kek,
-            )
+            .hash_password_into(master_password.as_bytes(), &kdf.salt, &mut kek)
             .map_err(|error| error.to_string())?;
 
         Ok(kek)
@@ -132,31 +123,47 @@ impl KeyEnvelope {
     // 根据 vault_id 从文件读取并反序列化信封。
     // Load and deserialize an envelope from the file identified by vault_id.
     pub fn from_vault_file(vault_id: &str) -> Result<Self, String> {
+        validate_vault_id(vault_id)?;
         let file_path = Self::vault_file_path(vault_id)?;
         if !file_path.exists() {
-            return Err(format!("vault '{}' 不存在: {}", vault_id, file_path.display()));
+            return Err(format!(
+                "vault '{}' 不存在: {}",
+                vault_id,
+                file_path.display()
+            ));
         }
 
         let json_text = fs::read_to_string(&file_path)
             .map_err(|error| format!("读取 vault 文件失败: {error}"))?;
-        serde_json::from_str(&json_text)
-            .map_err(|error| format!("解析 vault JSON 失败: {error}"))
+        let envelope: Self = serde_json::from_str(&json_text)
+            .map_err(|error| format!("解析 vault JSON 失败: {error}"))?;
+        if envelope.format_version != 1 || envelope.vault_id != vault_id {
+            return Err("vault 信封版本或标识不匹配".to_string());
+        }
+        validate_vault_id(&envelope.vault_id)?;
+        if envelope.key_wrap.algorithm != "xchacha20poly1305"
+            || envelope.key_wrap.nonce.len() != NONCE_LEN
+            || envelope.key_wrap.ciphertext.len() != DEK_LEN + 16
+        {
+            return Err("vault 信封加密参数无效".to_string());
+        }
+        // Validate untrusted KDF parameters before any costly derivation.
+        validate_kdf(&envelope.kdf)?;
+        Ok(envelope)
     }
 
     // 获取项目运行目录下的 vaults 文件夹。
     // Get the vaults directory under the current project directory.
     fn vaults_dir() -> Result<PathBuf, String> {
-        let current_dir = std::env::current_dir()
-            .map_err(|error| format!("获取当前目录失败: {error}"))?;
-        Ok(current_dir.join("vaults"))
+        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vaults"))
     }
 
     // 将 vault_id 转换为安全的文件名，避免路径分隔符改变目录结构。
     // Convert vault_id into a safe filename so separators cannot create subdirectories.
     pub fn vault_file_path(vault_id: &str) -> Result<PathBuf, String> {
+        validate_vault_id(vault_id)?;
         let vaults_dir = Self::vaults_dir()?;
-        let safe_id = vault_id.trim().replace(['/', '\\'], "_");
-        Ok(vaults_dir.join(format!("{safe_id}.json")))
+        Ok(vaults_dir.join(format!("{vault_id}.json")))
     }
 
     pub fn format_version(&self) -> u8 {
@@ -174,16 +181,19 @@ impl KeyEnvelope {
     pub fn key_wrap(&self) -> &KeyWrap {
         &self.key_wrap
     }
-    
+
     // 使用主密码派生 KEK，并解密出原始 DEK。
     // Derive the KEK from the master password and decrypt the original DEK.
-    pub fn get_dek(
-        &self,
-        master_password: &str,
-    ) -> Result<[u8; DEK_LEN], String> {
+    pub fn get_dek(&self, master_password: &str) -> Result<[u8; DEK_LEN], String> {
+        if self.format_version != 1
+            || self.key_wrap.algorithm != "xchacha20poly1305"
+            || self.key_wrap.nonce.len() != NONCE_LEN
+        {
+            return Err("vault 信封加密参数无效".to_string());
+        }
         let kek = self.derive_kek(master_password)?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&kek)
-            .map_err(|_| "KEK 长度错误".to_string())?;
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(&kek).map_err(|_| "KEK 长度错误".to_string())?;
         let vault_id = &self.vault_id;
         let aad = format!("private-vault|v1|{vault_id}|key-envelope");
         let xnonce = XNonce::try_from(self.key_wrap.nonce.as_slice())
@@ -242,19 +252,15 @@ impl KdfConfig {
 impl KeyWrap {
     // 使用 XChaCha20-Poly1305 加密 DEK。
     // Encrypt the DEK with XChaCha20-Poly1305.
-    pub fn new(
-        kek: &[u8; KEK_LEN],
-        dek: &[u8; DEK_LEN],
-        vault_id: &str,
-    ) -> Result<Self, String> {
+    pub fn new(kek: &[u8; KEK_LEN], dek: &[u8; DEK_LEN], vault_id: &str) -> Result<Self, String> {
         let nonce = random_bytes::<NONCE_LEN>()?;
 
-        let cipher = XChaCha20Poly1305::new_from_slice(kek)
-            .map_err(|_| "KEK 长度错误".to_string())?;
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(kek).map_err(|_| "KEK 长度错误".to_string())?;
 
         let aad = format!("private-vault|v1|{vault_id}|key-envelope");
-        let xnonce = XNonce::try_from(nonce.as_slice())
-            .map_err(|_| "Nonce 长度错误".to_string())?;
+        let xnonce =
+            XNonce::try_from(nonce.as_slice()).map_err(|_| "Nonce 长度错误".to_string())?;
         let ciphertext = cipher
             .encrypt(
                 &xnonce,
@@ -291,4 +297,33 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     let mut bytes = [0u8; N];
     fill(&mut bytes).map_err(|error| error.to_string())?;
     Ok(bytes)
+}
+
+fn validate_kdf(kdf: &KdfConfig) -> Result<(), String> {
+    if kdf.algorithm != "argon2id" {
+        return Err("不支持的 KDF 算法".to_string());
+    }
+    if kdf.salt.len() != SALT_LEN {
+        return Err("KDF salt 长度无效".to_string());
+    }
+    if !(8_192..=MAX_MEM_COST_KIB).contains(&kdf.mem_cost_kib)
+        || !(1..=MAX_TIME_COST).contains(&kdf.time_cost)
+        || !(1..=MAX_PARALLELISM).contains(&kdf.parallelism)
+    {
+        return Err("KDF 参数超出安全允许范围".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_vault_id(vault_id: &str) -> Result<(), String> {
+    let valid = !vault_id.is_empty()
+        && vault_id.len() <= 64
+        && vault_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err("vault ID 只能包含字母、数字、- 或 _，且最长 64 个字符".to_string())
+    }
 }
