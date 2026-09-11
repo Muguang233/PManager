@@ -7,6 +7,11 @@
 # JavaScript package/build outputs (desktop and web prototypes)
 **/node_modules/
 **/dist/
+
+# Unused assets shipped by the Vite starter template
+**/src/assets/hero.png
+**/src/assets/react.svg
+**/src/assets/vite.svg
 *.db
 
 # Local archive and editor metadata
