@@ -2,5 +2,23 @@
 /cfg
 /vaults
 /desktop/rust/target
+/desktop/rust/gen
 /desktop/rust/vaults
+# JavaScript package/build outputs (desktop and web prototypes)
+**/node_modules/
+**/dist/
 *.db
+
+# Local archive and editor metadata
+/archive/
+/.vscode/
+
+# Rust and local runtime artifacts
+*.rs.bk
+*.log
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
