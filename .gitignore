@@ -17,6 +17,7 @@
 # Local archive and editor metadata
 /archive/
 /.vscode/
+/scripts/dev-desktop.ps1
 
 # Rust and local runtime artifacts
 *.rs.bk
