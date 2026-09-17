@@ -7,7 +7,7 @@ use chacha20poly1305::{
 };
 use getrandom::fill;
 use key_envelope::{KeyEnvelope, validate_vault_id};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::State;
@@ -77,6 +77,42 @@ struct Contact {
     label: Option<String>,
     is_primary: bool,
 }
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+struct IntroductionInput {
+    introduced_by_id: Option<String>,
+    met_with_id: Option<String>,
+    context: Option<String>,
+    location: Option<String>,
+    met_on: Option<String>,
+    note: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RelationshipInput {
+    related_person_id: String,
+    relationship_type: String,
+    direction: Option<String>,
+    note: Option<String>,
+}
+#[derive(Debug, Serialize)]
+struct Introduction {
+    introduced_by_id: Option<String>,
+    introduced_by_name: Option<String>,
+    met_with_id: Option<String>,
+    met_with_name: Option<String>,
+    context: Option<String>,
+    location: Option<String>,
+    met_on: Option<String>,
+    note: Option<String>,
+}
+#[derive(Debug, Serialize)]
+struct Relationship {
+    relationship_id: String,
+    person_id: String,
+    name: String,
+    relationship_type: String,
+    direction: Option<String>,
+    note: Option<String>,
+}
 #[derive(Debug, Serialize, Deserialize)]
 struct PersonInput {
     name: String,
@@ -84,6 +120,10 @@ struct PersonInput {
     birthday: Option<String>,
     note: Option<String>,
     contacts: Vec<ContactInput>,
+    #[serde(default)]
+    introduction: IntroductionInput,
+    #[serde(default)]
+    relationships: Vec<RelationshipInput>,
 }
 #[derive(Debug, Serialize)]
 struct PersonSummary {
@@ -100,6 +140,8 @@ struct Person {
     birthday: Option<String>,
     note: Option<String>,
     contacts: Vec<Contact>,
+    introduction: Option<Introduction>,
+    relationships: Vec<Relationship>,
 }
 struct Session {
     account_id: Option<String>,
@@ -368,6 +410,8 @@ fn decrypt_people(
 ) -> Result<(), String> {
     let people: Vec<(String,Vec<u8>,Vec<u8>,Option<Vec<u8>>,Option<Vec<u8>>)> = connection.prepare("SELECT person_id,enc_name,enc_gender,enc_birthday,enc_note FROM people WHERE vault_id=?1 AND is_deleted=0").map_err(|e| format!("读取联系人失败: {e}"))?.query_map([vault_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e| format!("读取联系人失败: {e}"))?.collect::<Result<_,_>>().map_err(|e| format!("读取联系人失败: {e}"))?;
     let contacts: Vec<(String,Vec<u8>,Vec<u8>,Option<Vec<u8>>,Option<Vec<u8>>)> = connection.prepare("SELECT c.contact_id,c.enc_type,c.enc_value,c.enc_label,c.enc_is_primary FROM contact_methods c JOIN people p ON p.person_id=c.person_id WHERE p.vault_id=?1 AND c.is_deleted=0 AND p.is_deleted=0").map_err(|e| format!("读取联系方式失败: {e}"))?.query_map([vault_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e| format!("读取联系方式失败: {e}"))?.collect::<Result<_,_>>().map_err(|e| format!("读取联系方式失败: {e}"))?;
+    let introductions: Vec<(String, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)> = connection.prepare("SELECT introduction_id,enc_context,enc_location,enc_met_on,enc_note FROM introductions WHERE vault_id=?1 AND is_deleted=0").map_err(|e| format!("读取认识记录失败: {e}"))?.query_map([vault_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e| format!("读取认识记录失败: {e}"))?.collect::<Result<_,_>>().map_err(|e| format!("读取认识记录失败: {e}"))?;
+    let relationships: Vec<(String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = connection.prepare("SELECT relationship_id,enc_type,enc_direction,enc_note FROM relationships WHERE vault_id=?1 AND is_deleted=0").map_err(|e| format!("读取关系失败: {e}"))?.query_map([vault_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e| format!("读取关系失败: {e}"))?.collect::<Result<_,_>>().map_err(|e| format!("读取关系失败: {e}"))?;
     let tx = connection
         .transaction()
         .map_err(|e| format!("开启联系人内存事务失败: {e}"))?;
@@ -386,6 +430,22 @@ fn decrypt_people(
                 .transpose()
         };
         tx.execute("UPDATE contact_methods SET enc_type=?1,enc_value=?2,enc_label=?3,enc_is_primary=?4 WHERE contact_id=?5",params![decrypt_field(dek,vault_id,"contact_methods",&id,"enc_type",&kind)?,decrypt_field(dek,vault_id,"contact_methods",&id,"enc_value",&value)?,opt("enc_label",label)?,opt("enc_is_primary",primary)?,id]).map_err(|e| format!("写入内存联系方式失败: {e}"))?;
+    }
+    for (id, context, location, met_on, note) in introductions {
+        let optional = |column: &str, value: Option<Vec<u8>>| {
+            value
+                .map(|value| decrypt_field(dek, vault_id, "introductions", &id, column, &value))
+                .transpose()
+        };
+        tx.execute("UPDATE introductions SET enc_context=?1,enc_location=?2,enc_met_on=?3,enc_note=?4 WHERE introduction_id=?5",params![optional("enc_context",context)?,optional("enc_location",location)?,optional("enc_met_on",met_on)?,optional("enc_note",note)?,id]).map_err(|error| format!("写入内存认识记录失败: {error}"))?;
+    }
+    for (id, relationship_type, direction, note) in relationships {
+        let optional = |column: &str, value: Option<Vec<u8>>| {
+            value
+                .map(|value| decrypt_field(dek, vault_id, "relationships", &id, column, &value))
+                .transpose()
+        };
+        tx.execute("UPDATE relationships SET enc_type=?1,enc_direction=?2,enc_note=?3 WHERE relationship_id=?4",params![decrypt_field(dek,vault_id,"relationships",&id,"enc_type",&relationship_type)?,optional("enc_direction",direction)?,optional("enc_note",note)?,id]).map_err(|error| format!("写入内存关系失败: {error}"))?;
     }
     tx.commit()
         .map_err(|e| format!("提交联系人内存事务失败: {e}"))
@@ -423,6 +483,144 @@ fn insert_contacts(
                 .map(|v| encrypt_field(dek, vault_id, "contact_methods", &id, "enc_label", v))
                 .transpose()?;
             connection.execute("INSERT INTO contact_methods (contact_id,person_id,enc_type,enc_value,enc_label,enc_is_primary) VALUES (?1,?2,?3,?4,?5,?6)",params![id,person_id,encrypt_field(dek,vault_id,"contact_methods",&id,"enc_type",&contact.kind)?,encrypt_field(dek,vault_id,"contact_methods",&id,"enc_value",&contact.value)?,label,encrypt_field(dek,vault_id,"contact_methods",&id,"enc_is_primary",if contact.is_primary { "1" } else { "0" })?]).map_err(|e| format!("保存联系方式失败: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn nonempty(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|value| !value.trim().is_empty())
+}
+
+fn introduction_is_empty(input: &IntroductionInput) -> bool {
+    input
+        .introduced_by_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && input
+            .met_with_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        && nonempty(&input.context).is_none()
+        && nonempty(&input.location).is_none()
+        && nonempty(&input.met_on).is_none()
+        && nonempty(&input.note).is_none()
+}
+
+fn ensure_person_reference(
+    connection: &Connection,
+    vault_id: &str,
+    person_id: &str,
+    field: &str,
+) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM people WHERE person_id=?1 AND vault_id=?2 AND is_deleted=0)",
+            params![person_id, vault_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("验证关联联系人失败: {error}"))?;
+    if exists {
+        Ok(())
+    } else {
+        Err(format!("{field} 必须是当前 vault 中存在的联系人"))
+    }
+}
+
+fn validate_person_references(
+    connection: &Connection,
+    vault_id: &str,
+    person_id: &str,
+    input: &PersonInput,
+) -> Result<(), String> {
+    for (field, value) in [
+        ("推荐人", input.introduction.introduced_by_id.as_deref()),
+        ("认识对象", input.introduction.met_with_id.as_deref()),
+    ] {
+        if let Some(id) = value.filter(|id| !id.is_empty()) {
+            if id == person_id {
+                return Err(format!("{field} 不能是联系人本人"));
+            }
+            ensure_person_reference(connection, vault_id, id, field)?;
+        }
+    }
+    for relationship in &input.relationships {
+        if relationship.related_person_id.is_empty()
+            || relationship.relationship_type.trim().is_empty()
+        {
+            return Err("关联人和关系类型不能为空".to_string());
+        }
+        if relationship.related_person_id == person_id {
+            return Err("关联人不能是联系人本人".to_string());
+        }
+        ensure_person_reference(
+            connection,
+            vault_id,
+            &relationship.related_person_id,
+            "关联人",
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_introduction(
+    connection: &Connection,
+    vault_id: &str,
+    person_id: &str,
+    dek: &[u8; 32],
+    input: &IntroductionInput,
+    plaintext: bool,
+) -> Result<(), String> {
+    if introduction_is_empty(input) {
+        return Ok(());
+    }
+    let id = random_id()?;
+    if plaintext {
+        connection.execute(
+            "INSERT INTO introductions (introduction_id,vault_id,introduced_person_id,introduced_by_id,met_with_id,enc_context,enc_location,enc_met_on,enc_note) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![id,vault_id,person_id,input.introduced_by_id.as_deref().filter(|value| !value.is_empty()),input.met_with_id.as_deref().filter(|value| !value.is_empty()),optional_bytes(&input.context),optional_bytes(&input.location),optional_bytes(&input.met_on),optional_bytes(&input.note)],
+        ).map_err(|error| format!("写入内存认识记录失败: {error}"))?;
+    } else {
+        let encrypt_optional = |column: &str, value: &Option<String>| {
+            nonempty(value)
+                .map(|value| encrypt_field(dek, vault_id, "introductions", &id, column, value))
+                .transpose()
+        };
+        connection.execute(
+            "INSERT INTO introductions (introduction_id,vault_id,introduced_person_id,introduced_by_id,met_with_id,enc_context,enc_location,enc_met_on,enc_note) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![id,vault_id,person_id,input.introduced_by_id.as_deref().filter(|value| !value.is_empty()),input.met_with_id.as_deref().filter(|value| !value.is_empty()),encrypt_optional("enc_context", &input.context)?,encrypt_optional("enc_location", &input.location)?,encrypt_optional("enc_met_on", &input.met_on)?,encrypt_optional("enc_note", &input.note)?],
+        ).map_err(|error| format!("保存认识记录失败: {error}"))?;
+    }
+    Ok(())
+}
+
+fn insert_relationships(
+    connection: &Connection,
+    vault_id: &str,
+    person_id: &str,
+    dek: &[u8; 32],
+    relationships: &[RelationshipInput],
+    plaintext: bool,
+) -> Result<(), String> {
+    for relationship in relationships {
+        let id = random_id()?;
+        if plaintext {
+            connection.execute(
+                "INSERT INTO relationships (relationship_id,vault_id,person_a_id,person_b_id,enc_type,enc_direction,enc_note) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![id,vault_id,person_id,relationship.related_person_id,relationship.relationship_type.as_bytes(),optional_bytes(&relationship.direction),optional_bytes(&relationship.note)],
+            ).map_err(|error| format!("写入内存关系失败: {error}"))?;
+        } else {
+            let encrypt_optional = |column: &str, value: &Option<String>| {
+                nonempty(value)
+                    .map(|value| encrypt_field(dek, vault_id, "relationships", &id, column, value))
+                    .transpose()
+            };
+            connection.execute(
+                "INSERT INTO relationships (relationship_id,vault_id,person_a_id,person_b_id,enc_type,enc_direction,enc_note) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![id,vault_id,person_id,relationship.related_person_id,encrypt_field(dek,vault_id,"relationships",&id,"enc_type",&relationship.relationship_type)?,encrypt_optional("enc_direction",&relationship.direction)?,encrypt_optional("enc_note",&relationship.note)?],
+            ).map_err(|error| format!("保存关系失败: {error}"))?;
         }
     }
     Ok(())
@@ -719,6 +917,8 @@ fn get_person(person_id: String, state: State<'_, AppState>) -> Result<Person, S
         .ok_or_else(|| "请先解锁 vault".to_string())?;
     let (name,gender,birthday,note):(Vec<u8>,Vec<u8>,Option<Vec<u8>>,Option<Vec<u8>>) = db.query_row("SELECT enc_name,enc_gender,enc_birthday,enc_note FROM people WHERE person_id=?1 AND vault_id=?2 AND is_deleted=0",params![person_id,vault_id],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|_| "联系人不存在".to_string())?;
     let contacts = db.prepare("SELECT contact_id,enc_type,enc_value,enc_label,enc_is_primary FROM contact_methods WHERE person_id=?1 AND is_deleted=0 ORDER BY CAST(enc_is_primary AS TEXT) DESC").map_err(|e| format!("读取联系方式失败: {e}"))?.query_map([&person_id], |r| Ok(Contact { contact_id:r.get(0)?,kind:String::from_utf8(r.get::<_,Vec<u8>>(1)?).unwrap_or_default(),value:String::from_utf8(r.get::<_,Vec<u8>>(2)?).unwrap_or_default(),label:text(r.get(3)?),is_primary:text(r.get(4)?).as_deref()==Some("1") })).map_err(|e| format!("读取联系方式失败: {e}"))?.collect::<Result<Vec<_>,_>>().map_err(|e| format!("读取联系方式失败: {e}"))?;
+    let introduction = db.query_row("SELECT i.introduced_by_id,by_person.enc_name,i.met_with_id,met_person.enc_name,i.enc_context,i.enc_location,i.enc_met_on,i.enc_note FROM introductions i LEFT JOIN people by_person ON by_person.person_id=i.introduced_by_id LEFT JOIN people met_person ON met_person.person_id=i.met_with_id WHERE i.introduced_person_id=?1 AND i.vault_id=?2 AND i.is_deleted=0 ORDER BY i.revision DESC LIMIT 1",params![person_id,vault_id],|row| Ok(Introduction { introduced_by_id:row.get(0)?,introduced_by_name:text(row.get(1)?),met_with_id:row.get(2)?,met_with_name:text(row.get(3)?),context:text(row.get(4)?),location:text(row.get(5)?),met_on:text(row.get(6)?),note:text(row.get(7)?),})).optional().map_err(|error| format!("读取认识记录失败: {error}"))?;
+    let relationships = db.prepare("SELECT r.relationship_id,CASE WHEN r.person_a_id=?1 THEN r.person_b_id ELSE r.person_a_id END,p.enc_name,r.enc_type,r.enc_direction,r.enc_note FROM relationships r JOIN people p ON p.person_id=CASE WHEN r.person_a_id=?1 THEN r.person_b_id ELSE r.person_a_id END WHERE r.vault_id=?2 AND r.is_deleted=0 AND (r.person_a_id=?1 OR r.person_b_id=?1) ORDER BY CAST(p.enc_name AS TEXT)").map_err(|error| format!("读取关联人失败: {error}"))?.query_map(params![person_id,vault_id],|row| Ok(Relationship { relationship_id:row.get(0)?,person_id:row.get(1)?,name:String::from_utf8(row.get::<_,Vec<u8>>(2)?).unwrap_or_default(),relationship_type:String::from_utf8(row.get::<_,Vec<u8>>(3)?).unwrap_or_default(),direction:text(row.get(4)?),note:text(row.get(5)?),})).map_err(|error| format!("读取关联人失败: {error}"))?.collect::<Result<Vec<_>,_>>().map_err(|error| format!("读取关联人失败: {error}"))?;
     Ok(Person {
         person_id,
         name: String::from_utf8(name).unwrap_or_default(),
@@ -726,6 +926,8 @@ fn get_person(person_id: String, state: State<'_, AppState>) -> Result<Person, S
         birthday: text(birthday),
         note: text(note),
         contacts,
+        introduction,
+        relationships,
     })
 }
 #[tauri::command]
@@ -746,14 +948,19 @@ fn create_person(input: PersonInput, state: State<'_, AppState>) -> Result<Perso
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "未设置".to_string());
     let disk = Connection::open(database_path()).map_err(|e| format!("打开加密数据库失败: {e}"))?;
+    validate_person_references(&disk, &vault, &id, &input)?;
     disk.execute("INSERT INTO people (person_id,vault_id,enc_name,enc_gender,enc_birthday,enc_note) VALUES (?1,?2,?3,?4,?5,?6)",params![id,vault,encrypt_field(&dek,&vault,"people",&id,"enc_name",&input.name)?,encrypt_field(&dek,&vault,"people",&id,"enc_gender",&gender)?,input.birthday.as_deref().filter(|v|!v.is_empty()).map(|v|encrypt_field(&dek,&vault,"people",&id,"enc_birthday",v)).transpose()?,input.note.as_deref().filter(|v|!v.is_empty()).map(|v|encrypt_field(&dek,&vault,"people",&id,"enc_note",v)).transpose()?]).map_err(|e|format!("保存联系人失败: {e}"))?;
     insert_contacts(&disk, &vault, &id, &dek, &input.contacts, false)?;
+    insert_introduction(&disk, &vault, &id, &dek, &input.introduction, false)?;
+    insert_relationships(&disk, &vault, &id, &dek, &input.relationships, false)?;
     let db = session
         .database
         .as_mut()
         .ok_or_else(|| "请先解锁 vault".to_string())?;
     db.execute("INSERT INTO people (person_id,vault_id,enc_name,enc_gender,enc_birthday,enc_note) VALUES (?1,?2,?3,?4,?5,?6)",params![id,vault,input.name.as_bytes(),gender.as_bytes(),optional_bytes(&input.birthday),optional_bytes(&input.note)]).map_err(|e|format!("写入内存联系人失败: {e}"))?;
     insert_contacts(db, &vault, &id, &dek, &input.contacts, true)?;
+    insert_introduction(db, &vault, &id, &dek, &input.introduction, true)?;
+    insert_relationships(db, &vault, &id, &dek, &input.relationships, true)?;
     Ok(Person {
         person_id: id,
         name: input.name,
@@ -761,6 +968,8 @@ fn create_person(input: PersonInput, state: State<'_, AppState>) -> Result<Perso
         birthday: input.birthday.filter(|v| !v.is_empty()),
         note: input.note.filter(|v| !v.is_empty()),
         contacts: Vec::new(),
+        introduction: None,
+        relationships: Vec::new(),
     })
 }
 #[tauri::command]
@@ -784,6 +993,7 @@ fn update_person(
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "未设置".to_string());
     let disk = Connection::open(database_path()).map_err(|e| format!("打开加密数据库失败: {e}"))?;
+    validate_person_references(&disk, &vault, &person_id, &input)?;
     if disk.execute("UPDATE people SET enc_name=?1,enc_gender=?2,enc_birthday=?3,enc_note=?4,revision=revision+1 WHERE person_id=?5 AND vault_id=?6 AND is_deleted=0",params![encrypt_field(&dek,&vault,"people",&person_id,"enc_name",&input.name)?,encrypt_field(&dek,&vault,"people",&person_id,"enc_gender",&gender)?,input.birthday.as_deref().filter(|v|!v.is_empty()).map(|v|encrypt_field(&dek,&vault,"people",&person_id,"enc_birthday",v)).transpose()?,input.note.as_deref().filter(|v|!v.is_empty()).map(|v|encrypt_field(&dek,&vault,"people",&person_id,"enc_note",v)).transpose()?,person_id,vault]).map_err(|e|format!("更新联系人失败: {e}"))?!=1{return Err("联系人不存在".to_string())};
     disk.execute(
         "UPDATE contact_methods SET is_deleted=1 WHERE person_id=?1",
@@ -791,6 +1001,10 @@ fn update_person(
     )
     .map_err(|e| format!("更新联系方式失败: {e}"))?;
     insert_contacts(&disk, &vault, &person_id, &dek, &input.contacts, false)?;
+    disk.execute("UPDATE introductions SET is_deleted=1,revision=revision+1 WHERE introduced_person_id=?1 AND vault_id=?2 AND is_deleted=0",params![person_id,vault]).map_err(|error| format!("更新认识记录失败: {error}"))?;
+    disk.execute("UPDATE relationships SET is_deleted=1,revision=revision+1 WHERE person_a_id=?1 AND vault_id=?2 AND is_deleted=0",params![person_id,vault]).map_err(|error| format!("更新关系失败: {error}"))?;
+    insert_introduction(&disk, &vault, &person_id, &dek, &input.introduction, false)?;
+    insert_relationships(&disk, &vault, &person_id, &dek, &input.relationships, false)?;
     let db = session
         .database
         .as_mut()
@@ -802,6 +1016,18 @@ fn update_person(
     )
     .map_err(|e| format!("更新内存联系方式失败: {e}"))?;
     insert_contacts(db, &vault, &person_id, &dek, &input.contacts, true)?;
+    db.execute(
+        "DELETE FROM introductions WHERE introduced_person_id=?1 AND vault_id=?2",
+        params![person_id, vault],
+    )
+    .map_err(|error| format!("更新内存认识记录失败: {error}"))?;
+    db.execute(
+        "DELETE FROM relationships WHERE person_a_id=?1 AND vault_id=?2",
+        params![person_id, vault],
+    )
+    .map_err(|error| format!("更新内存关系失败: {error}"))?;
+    insert_introduction(db, &vault, &person_id, &dek, &input.introduction, true)?;
+    insert_relationships(db, &vault, &person_id, &dek, &input.relationships, true)?;
     Ok(())
 }
 #[tauri::command]
