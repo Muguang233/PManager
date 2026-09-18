@@ -9,7 +9,13 @@ use getrandom::fill;
 use key_envelope::{KeyEnvelope, validate_vault_id};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::State;
 use zeroize::Zeroizing;
 
@@ -31,6 +37,22 @@ struct AuthState {
     authenticated: bool,
     username: Option<String>,
     needs_registration: bool,
+    remembered_accounts: Vec<RememberedAccount>,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RememberedAccount {
+    account_id: String,
+    username: String,
+    last_signed_in_at: u64,
+    // Reserved for backend session validation. It remains None in local-only mode.
+    server_valid_until: Option<u64>,
+    #[serde(default)]
+    server_session_valid: Option<bool>,
+}
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct LocalSessionFile {
+    #[serde(default)]
+    accounts: Vec<RememberedAccount>,
 }
 #[derive(Debug, Serialize)]
 struct VaultSummary {
@@ -167,6 +189,76 @@ fn database_path() -> PathBuf {
 }
 fn accounts_path() -> PathBuf {
     project_root().join("cfg/accounts.json")
+}
+fn local_session_path() -> PathBuf {
+    project_root().join("cfg/session.json")
+}
+fn load_local_session() -> Result<LocalSessionFile, String> {
+    let path = local_session_path();
+    if !path.exists() {
+        return Ok(LocalSessionFile::default());
+    }
+    serde_json::from_str(
+        &fs::read_to_string(path).map_err(|error| format!("读取本地会话失败: {error}"))?,
+    )
+    .map_err(|error| format!("解析本地会话失败: {error}"))
+}
+fn unix_timestamp() -> Result<u64, String> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs())
+}
+fn verify_remembered_session(account_id: &str) -> Result<(), String> {
+    if let Some(account) = load_local_session()?
+        .accounts
+        .iter()
+        .find(|account| account.account_id == account_id)
+    {
+        if account.server_session_valid == Some(false) {
+            return Err("后端会话已失效，请重新验证账户".to_string());
+        }
+        if account
+            .server_valid_until
+            .is_some_and(|expires_at| expires_at <= unix_timestamp().unwrap_or_default())
+        {
+            return Err("后端会话已过期，请重新验证账户".to_string());
+        }
+    }
+    Ok(())
+}
+fn remember_account(account_id: &str, username: &str) -> Result<Vec<RememberedAccount>, String> {
+    let mut session = load_local_session()?;
+    let previous = session
+        .accounts
+        .iter()
+        .find(|account| account.account_id == account_id)
+        .cloned();
+    session
+        .accounts
+        .retain(|account| account.account_id != account_id);
+    session.accounts.insert(
+        0,
+        RememberedAccount {
+            account_id: account_id.to_string(),
+            username: username.to_string(),
+            last_signed_in_at: unix_timestamp()?,
+            server_valid_until: previous
+                .as_ref()
+                .and_then(|account| account.server_valid_until),
+            server_session_valid: previous.and_then(|account| account.server_session_valid),
+        },
+    );
+    if let Some(parent) = local_session_path().parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建会话目录失败: {error}"))?;
+    }
+    fs::write(
+        local_session_path(),
+        serde_json::to_string_pretty(&session)
+            .map_err(|error| format!("序列化本地会话失败: {error}"))?,
+    )
+    .map_err(|error| format!("保存本地会话失败: {error}"))?;
+    Ok(session.accounts)
 }
 fn ui_settings_path() -> PathBuf {
     project_root().join("cfg/ui-settings.json")
@@ -666,6 +758,7 @@ fn insert_relationships(
 #[tauri::command]
 fn auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
     let accounts = load_accounts()?;
+    let remembered_accounts = load_local_session()?.accounts;
     let session = state
         .session
         .lock()
@@ -674,6 +767,7 @@ fn auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
         authenticated: session.username.is_some(),
         username: session.username.clone(),
         needs_registration: accounts.is_empty(),
+        remembered_accounts,
     })
 }
 #[tauri::command]
@@ -699,6 +793,7 @@ fn register_account(
         password_hash: derive_account_hash(&password, &salt)?.to_vec(),
     });
     save_accounts(&accounts)?;
+    let remembered_accounts = remember_account(&account_id, &username)?;
     let mut session = state
         .session
         .lock()
@@ -709,6 +804,7 @@ fn register_account(
         authenticated: true,
         username: Some(username),
         needs_registration: false,
+        remembered_accounts,
     })
 }
 #[tauri::command]
@@ -729,6 +825,9 @@ fn login(
     if account.account_id.is_empty() {
         return Err("账户记录缺少 account_id；请重新注册".to_string());
     }
+    // When a backend later writes a validity flag or expiry, local login must honor it.
+    verify_remembered_session(&account.account_id)?;
+    let remembered_accounts = remember_account(&account.account_id, &username)?;
     let mut session = state
         .session
         .lock()
@@ -739,6 +838,7 @@ fn login(
         authenticated: true,
         username: Some(username),
         needs_registration: false,
+        remembered_accounts,
     })
 }
 #[tauri::command]
