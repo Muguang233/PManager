@@ -18,6 +18,8 @@
         "minWidth": 900,
         "minHeight": 520,
         "resizable": true,
+        "alwaysOnTop": false,
+        "focus": false,
         "decorations": false,
         "shadow": false
       }
