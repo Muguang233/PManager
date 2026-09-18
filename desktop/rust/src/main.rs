@@ -9,7 +9,7 @@ use getrandom::fill;
 use key_envelope::{KeyEnvelope, validate_vault_id};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 use tauri::State;
 use zeroize::Zeroizing;
 
@@ -61,6 +61,11 @@ struct Credential {
     password: String,
     totp_secret: Option<String>,
     note: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct UiSettings {
+    #[serde(default)]
+    password_reveal_seconds: HashMap<String, u8>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ContactInput {
@@ -162,6 +167,38 @@ fn database_path() -> PathBuf {
 }
 fn accounts_path() -> PathBuf {
     project_root().join("cfg/accounts.json")
+}
+fn ui_settings_path() -> PathBuf {
+    project_root().join("cfg/ui-settings.json")
+}
+fn load_ui_settings() -> Result<UiSettings, String> {
+    let path = ui_settings_path();
+    if !path.exists() {
+        return Ok(UiSettings::default());
+    }
+    serde_json::from_str(
+        &fs::read_to_string(path).map_err(|error| format!("读取界面设置失败: {error}"))?,
+    )
+    .map_err(|error| format!("解析界面设置失败: {error}"))
+}
+fn save_ui_settings(settings: &UiSettings) -> Result<(), String> {
+    let path = ui_settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建设置目录失败: {error}"))?;
+    }
+    fs::write(
+        path,
+        serde_json::to_string_pretty(settings)
+            .map_err(|error| format!("序列化界面设置失败: {error}"))?,
+    )
+    .map_err(|error| format!("保存界面设置失败: {error}"))
+}
+fn reveal_seconds_for(account_id: &str) -> Result<u8, String> {
+    Ok(load_ui_settings()?
+        .password_reveal_seconds
+        .get(account_id)
+        .copied()
+        .unwrap_or(10))
 }
 fn load_accounts() -> Result<Vec<AccountRecord>, String> {
     let path = accounts_path();
@@ -879,6 +916,63 @@ fn list_credentials(query: String, state: State<'_, AppState>) -> Result<Vec<Cre
     .collect::<Result<_, _>>()
     .map_err(|e| format!("查询凭据失败: {e}"))
 }
+
+#[tauri::command]
+fn get_password_reveal_seconds(state: State<'_, AppState>) -> Result<u8, String> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "会话锁定失败".to_string())?;
+    let account_id = session
+        .account_id
+        .as_deref()
+        .ok_or_else(|| "请先登录账户".to_string())?;
+    reveal_seconds_for(account_id)
+}
+
+#[tauri::command]
+fn set_password_reveal_seconds(seconds: u8, state: State<'_, AppState>) -> Result<u8, String> {
+    if !(1..=60).contains(&seconds) {
+        return Err("密码显示时间必须在 1 到 60 秒之间".to_string());
+    }
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "会话锁定失败".to_string())?;
+    let account_id = session
+        .account_id
+        .as_deref()
+        .ok_or_else(|| "请先登录账户".to_string())?;
+    let mut settings = load_ui_settings()?;
+    settings
+        .password_reveal_seconds
+        .insert(account_id.to_string(), seconds);
+    save_ui_settings(&settings)?;
+    Ok(seconds)
+}
+
+#[tauri::command]
+fn reveal_credential_password(
+    credential_id: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "会话锁定失败".to_string())?;
+    let (vault_id, active_dek) = required_session(&session)?;
+    let verified_dek =
+        Zeroizing::new(KeyEnvelope::from_vault_file(vault_id)?.get_dek(&master_password)?);
+    if verified_dek.as_ref() != active_dek {
+        return Err("主密码验证失败".to_string());
+    }
+    session.database.as_ref().ok_or_else(|| "请先解锁 vault".to_string())?.query_row(
+        "SELECT enc_password FROM credentials WHERE credential_id=?1 AND vault_id=?2 AND is_deleted=0",
+        params![credential_id, vault_id],
+        |row| String::from_utf8(row.get::<_, Vec<u8>>(0)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(error))),
+    ).map_err(|_| "凭据不存在或密码读取失败".to_string())
+}
 #[tauri::command]
 fn list_people(query: String, state: State<'_, AppState>) -> Result<Vec<PersonSummary>, String> {
     let session = state
@@ -1150,6 +1244,9 @@ fn main() {
             update_person,
             delete_person,
             list_credentials,
+            get_password_reveal_seconds,
+            set_password_reveal_seconds,
+            reveal_credential_password,
             create_credential,
             update_credential,
             delete_credential
