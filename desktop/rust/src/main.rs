@@ -842,6 +842,34 @@ fn login(
     })
 }
 #[tauri::command]
+fn quick_login(account_id: String, state: State<'_, AppState>) -> Result<AuthState, String> {
+    verify_remembered_session(&account_id)?;
+    let account = load_accounts()?
+        .into_iter()
+        .find(|account| account.account_id == account_id)
+        .ok_or_else(|| "快捷登录账户已不存在，请使用密码登录".to_string())?;
+    let remembered = load_local_session()?
+        .accounts
+        .into_iter()
+        .any(|remembered| remembered.account_id == account.account_id);
+    if !remembered {
+        return Err("该账户没有本地会话记录，请使用密码登录".to_string());
+    }
+    let remembered_accounts = remember_account(&account.account_id, &account.username)?;
+    let mut session = state
+        .session
+        .lock()
+        .map_err(|_| "会话锁定失败".to_string())?;
+    session.account_id = Some(account.account_id);
+    session.username = Some(account.username.clone());
+    Ok(AuthState {
+        authenticated: true,
+        username: Some(account.username),
+        needs_registration: false,
+        remembered_accounts,
+    })
+}
+#[tauri::command]
 fn list_vaults(state: State<'_, AppState>) -> Result<Vec<VaultSummary>, String> {
     let session = state
         .session
@@ -1334,6 +1362,7 @@ fn main() {
             auth_state,
             register_account,
             login,
+            quick_login,
             list_vaults,
             create_vault,
             unlock_vault,
